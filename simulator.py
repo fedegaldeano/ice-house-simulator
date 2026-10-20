@@ -114,6 +114,9 @@ def simulate(cal, p):
              + p["adv_spend"] / 1000 * p["orders_per_1000"]
              + (p["orders_2009"] * p["app_share"] if p["app_new"] else 0))
     total *= 1 + p["growth"]
+    # the app is for existing customers: the share applies to the 2009 base
+    app_orders = p["orders_2009"] * p["app_share"] * (1 + p["growth"])
+    app_eff = min(app_orders / total, 1.0) if total else 0.0
     base = df["orders_2009"] / df["orders_2009"].sum() * total
     orders = base.tolist()
     nov = [i for i, m in enumerate(months) if m == "Nov"]
@@ -126,7 +129,7 @@ def simulate(cal, p):
         orders[i] += moved * base[i] / oct_sum
 
     # 2. Capacity per hour of each stage
-    app = p["app_share"]
+    app = app_eff
     rate = dict(p["rate"])
     rate["Recording"] = 1 / (app / p["rate_app"]
                              + (1 - app) / p["rate"]["Recording"])
@@ -261,6 +264,7 @@ def simulate(cal, p):
     bd = [x for x in out["backlog_days"] if x is not None]
     k = {
         "total": total, "peak": max(orders), "bottleneck": bott,
+        "app_orders": app_orders, "app_eff": app_eff,
         "cycle": 60 / per_hour[bott], "rate": rate, "per_hour": per_hour,
         "normal_cap": normal_cap, "util": util, "shift_h": shift_h,
         "max_backlog": max(out["backlog"]),
@@ -295,7 +299,7 @@ def simulate(cal, p):
 def pnl(p, k):
     """Appendix 1 per parcel: 2009 vs the new scenario (one order = one parcel)."""
     n_ = k["total"]
-    app = p["app_share"]
+    app = k["app_eff"]
     sales = (1 - app) * P09["sales"] + app * APP_ORDER_VALUE
     stock = sales * P09["stock"] / P09["sales"]
     gross = sales - stock
@@ -482,18 +486,18 @@ with st.sidebar:
             key=kk("rate_disp"), help="Orders per dispatcher per hour."),
     }
     p["app_share"] = st.slider(
-        "Share of orders placed through the app", 0, 100, 5, format="%d%%",
-        key=kk("app_share"),
-        help="App orders do not need typing: the operator only checks them. "
-             "A higher share raises the average recording speed. Case: about "
-             "5% in 2010, doubling every year.") / 100
+        "Share of existing customers using the app", 0, 100, 5,
+        format="%d%%", key=kk("app_share"),
+        help="The app is aimed at existing customers only, so this share "
+             "applies to the 2009 orders (22,600), not to the new names or "
+             "the advertising. App orders do not need typing: the operator "
+             "only checks them, and they are worth about £60. Case: about 5% "
+             "in 2010, doubling every year.") / 100
     p["rate_app"] = st.number_input(
         "Recording, app orders (orders/hour)", 1.0, 300.0, 60.0, 5.0,
         key=kk("rate_app"),
         help="Checking an app order takes about one minute.")
-    blended = 1 / (p["app_share"] / p["rate_app"]
-                   + (1 - p["app_share"]) / p["rate"]["Recording"])
-    st.caption(f"Average recording speed: **{blended:.1f} orders/hour**")
+    app_caption = st.empty()
 
     # 4. HOURS --------------------------------------------------------------
     st.header("4. Hours")
@@ -646,6 +650,12 @@ with cal_slot.container():
              "overtime.")
 
 df, k = simulate(cal, p)
+app_caption.caption(
+    f"App orders: {p['orders_2009']:,} × {p['app_share']:.0%}"
+    + (f" × (1 {p['growth']:+.0%})" if p["growth"] else "")
+    + f" = **{k['app_orders']:,.0f}**, i.e. **{k['app_eff']:.1%} of all "
+    f"orders**. Average recording speed: **{k['rate']['Recording']:.1f} "
+    "orders/hour**.")
 
 # ------------------------------------------------------------------ KPIs
 ok = lambda cond: "✅" if cond else "⚠️"
@@ -763,7 +773,8 @@ with tab_c:
     with st.expander("How each line is calculated"):
         st.markdown(
             f"- **Sales:** £42 per order, £{APP_ORDER_VALUE:.0f} for app "
-            "orders (case trial), weighted by the app share.\n"
+            "orders (case trial). App orders = 2009 orders × share of "
+            "existing customers using the app; the rest pay £42.\n"
             "- **Cost of stock, packaging, carriage:** same share of sales as "
             "in 2009 (23 ÷ 42 = 54.8%).\n"
             "- **Loss of supplier discounts:** 8% of gross profit when there "
@@ -1046,7 +1057,8 @@ with tab3:
                                          f"{a['Dispatch']:.0f}/"
                                          f"{a['Stock']:.0f}",
             "People R/Pi/Pa/D": "/".join(str(p["people"][s]) for s in STAGES),
-            "App share": f"{p['app_share']:.0%}",
+            "App (existing customers)": f"{p['app_share']:.0%}",
+            "App share of orders": f"{k['app_eff']:.1%}",
             "Overtime weeks": len(p["ot_weeks"]),
             "Saturdays": len(p["sat_weeks"]),
             "Nov→Oct": f"{p['shift']:.0%}",
