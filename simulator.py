@@ -137,6 +137,21 @@ def simulate(cal, p):
 
     # 3. Hours per week (overtime and Saturdays only in the chosen weeks)
     d = p["days"]
+
+    # Safety stock (dynamic): forecast orders of the next `cover_days`
+    # working days, counted from the end of each week
+    cover_w = p["cover_days"] / d
+
+    def cover_at(i):
+        need, left_w, j = 0.0, cover_w, i + 1
+        while left_w > 1e-9 and j < n:
+            f_ = min(1.0, left_w)
+            need += orders[j] * f_
+            left_w -= f_
+            j += 1
+        return need
+
+    min_stock = [cover_at(i) for i in range(n)]
     shift_h = {s: p["hours_rec"] if s == "Recording" else p["hours_wh"]
                for s in STAGES}
     ot_w = [p["ot_hours"] if lb in p["ot_weeks"] else 0.0 for lb in labels]
@@ -150,6 +165,10 @@ def simulate(cal, p):
     capacity = [min(cap[s][i] for s in STAGES) for i in range(n)]
 
     # 4. Stock: what to buy and how much fits
+    if p["orders_2009"] <= 0:
+        raise ValueError("Christmas orders in 2009 must be above 0.")
+    if p["stock_m2"] <= 0:
+        raise ValueError("Stockroom area today must be above 0 m².")
     units_2009 = p["purchase_2009"] / p["unit_value"]
     margin = units_2009 / p["orders_2009"] - 1
     m2_unit = p["stock_m2"] / (FIRST_SHARE_2009 * units_2009)
@@ -179,8 +198,19 @@ def simulate(cal, p):
         # deliveries arriving this week, capped by free stockroom space
         arriving = (i == first_i) or (i in follow_weeks)
         if arriving and left > 0:
-            plan = (bought * p["first_share"] if i == first_i
-                    else to_deliver / left)
+            if i == first_i:
+                plan = bought * p["first_share"]
+            elif p["cover_mode"]:
+                # re-order sized to hold the safety stock until the next
+                # delivery: orders not yet picked + orders until then +
+                # the cover needed when the next delivery is due
+                nxt = next((w_ for w_ in follow_weeks if w_ > i), n)
+                pending = q["Recording"] + q["Picking"]
+                target = (pending + sum(orders[i:nxt])
+                          + min_stock[min(nxt, n) - 1])
+                plan = min(max(0.0, target - stock), to_deliver)
+            else:
+                plan = to_deliver / left
             if p["n_follow"] == 0:
                 plan = to_deliver
             got = max(0.0, min(plan, stock_cap - stock))
@@ -232,7 +262,7 @@ def simulate(cal, p):
                   else None for i in range(n)]
     df["cycle"] = [hb[i] * 60 / capacity[i] if capacity[i] > 0 else None
                    for i in range(n)]
-    df["min_stock"] = [sum(orders[i + 1:i + 3]) for i in range(n)]
+    df["min_stock"] = min_stock
 
     df["stock_cap"] = stock_cap
     late = [w_ for w_ in follow_weeks if w_ >= n]
@@ -277,7 +307,12 @@ def simulate(cal, p):
         "area": area,
         "stock_m2_peak": max(out["stock_peak"]) * m2_unit,
         "m2_unit": m2_unit, "margin": margin, "units_2009": units_2009,
-        "bought": bought, "not_delivered": to_deliver,
+        "bought": bought,
+        # with cover-based re-orders, stock left with the supplier was simply
+        # not needed; with the fixed calendar it is stock that never arrived
+        "not_delivered": 0.0 if p["cover_mode"] else to_deliver,
+        "not_needed": to_deliver if p["cover_mode"] else 0.0,
+        "cover_m2_peak": max(min_stock) * m2_unit,
         "cut": sum(d_["Cut by space"] for d_ in deliveries),
         "deliveries": deliveries, "late_reorders": len(late),
         "below_min": sum(1 for i in range(n) if (orders[i] > 0)
@@ -417,7 +452,7 @@ with st.sidebar:
             key=kk("dispatch_m2"),
             help="Rest of the 600 m² parcels room (600 − 330).")
         p["stock_m2"] = st.number_input(
-            "Stockroom area today (m²)", 0, 10000, 1800, 100,
+            "Stockroom area today (m²)", 100, 10000, 1800, 100,
             key=kk("stock_m2"), help="Three stockrooms of 600 m² each.")
         p["m2_packer"] = st.number_input(
             "Space per packer (m²)", 5.0, 60.0, round(330 / 16, 1), 0.5,
@@ -540,7 +575,7 @@ with st.sidebar:
              "for 2012 (1.15 × 1.15), +52% for 2013.") / 100
     with st.expander("Demand drivers"):
         p["orders_2009"] = st.number_input(
-            "Christmas orders in 2009", 0, 200000, 22600, 100,
+            "Christmas orders in 2009", 100, 200000, 22600, 100,
             key=kk("orders_2009"),
             help="Orders from the 2009 Christmas catalogue.")
         p["mailings_2009"] = st.number_input(
@@ -610,6 +645,24 @@ with st.sidebar:
             if 9 + j * p["interval"] < len(CAL) else "after the season"
             for j in range(1, p["n_follow"] + 1)]
     st.caption("Deliveries: Oct w1" + "".join(f", {a_}" for a_ in _arr))
+    p["cover_days"] = st.slider(
+        "Safety stock (working days of cover)", 0, 20, 10,
+        key=kk("cover_days"),
+        help="Robin wants at least 10 working days of stock. The safety "
+             "stock is dynamic: each week it equals the forecast orders of "
+             "the next N working days, so it rises towards the November "
+             "peak and falls in December. Lower it to test the 'lower stock "
+             "level' option. It never stops picking: it is the level the "
+             "deliveries aim to keep.")
+    p["cover_mode"] = st.radio(
+        "Re-order size", ["Fixed calendar (2009)", "Keep the safety stock"],
+        key=kk("reorder_mode"),
+        help="Fixed calendar: the stock left after the first delivery is "
+             "split equally between the re-orders, as in 2009. Keep the "
+             "safety stock: each re-order (same dates) brings what is needed "
+             "to keep the safety stock until the next delivery; stock not "
+             "needed is not bought. Both are capped by the free stockroom "
+             "space.") == "Keep the safety stock"
 
     # 7. SETTINGS -----------------------------------------------------------
     st.header("7. Policy and cost")
@@ -649,7 +702,22 @@ with cal_slot.container():
         help="Adds one normal working day in each week you pick, paid as "
              "overtime.")
 
-df, k = simulate(cal, p)
+# Calculate. If a combination of levers cannot be calculated, keep showing
+# the last valid result and say why in a pop-up, so the page (and the tab
+# you are on) does not break.
+try:
+    df, k = simulate(cal, p)
+    pl, plk = pnl(p, k)
+    st.session_state["last_ok"] = (df, k, pl, plk)
+    calc_error = None
+except Exception as e:  # noqa: BLE001
+    calc_error = str(e) or type(e).__name__
+    if "last_ok" not in st.session_state:
+        st.error(f"This set-up cannot be calculated: {calc_error} "
+                 "Use ↺ Reset to 2009 set-up.")
+        st.stop()
+    df, k, pl, plk = st.session_state["last_ok"]
+
 app_caption.caption(
     f"App orders: {p['orders_2009']:,} × {p['app_share']:.0%}"
     + (f" × (1 {p['growth']:+.0%})" if p["growth"] else "")
@@ -661,10 +729,14 @@ app_caption.caption(
 ok = lambda cond: "✅" if cond else "⚠️"
 NO_ARROW = dict(delta_color="off", delta_arrow="off")
 stock_ok = (k["not_delivered"] < 1 and k["stockout_weeks"] == 0)
-share_profit = k["cost_per_order"] / NET_PROFIT_PER_ORDER
-pl, plk = pnl(p, k)
 
-c = st.columns(5)
+# smaller cards so the six fit in one row
+st.markdown(
+    "<style>[data-testid='stMetricValue']{font-size:1.75rem;}"
+    "[data-testid='stMetricLabel'] p{font-size:0.85rem;}</style>",
+    unsafe_allow_html=True)
+
+c = st.columns(6)
 c[0].metric("Bottleneck", k["bottleneck"],
             f"cycle time {k['cycle']:.2f} min/order", **NO_ARROW,
             help="The slowest stage sets the pace of the whole warehouse. "
@@ -675,7 +747,7 @@ c[1].metric(f"{ok(k['max_backlog_days'] <= p['policy'])} Max backlog",
             **NO_ARROW,
             help="Most orders waiting at the end of a week, and the working "
                  "days needed to clear them.")
-c[2].metric(f"{ok(k['not_by_xmas'] < 1)} Not dispatched before Christmas",
+c[2].metric(f"{ok(k['not_by_xmas'] < 1)} Late for Christmas",
             f"{k['not_by_xmas']:,.0f} orders",
             help="Orders still waiting at the end of December week 3, the "
                  "last week to dispatch for Christmas.")
@@ -692,35 +764,39 @@ c[4].metric(f"{ok(stock_ok)} Stockroom space (peak)",
             help="Highest space the stock uses. Deliveries never exceed the "
                  "free space: what does not fit is postponed to the next "
                  "delivery. ✅ when all the stock arrives and picking never "
-                 "runs out.")
-
-c = st.columns(5)
-c[0].metric("Orders this season", f"{k['total']:,.0f}",
+                 "runs out. Weeks under the safety stock are in the Weekly "
+                 "flow and Space & people tabs.")
+c[5].metric("Orders this season", f"{k['total']:,.0f}",
             f"peak week {k['peak']:,.0f}", **NO_ARROW,
-            help="Forecast from the demand drivers, and the busiest week.")
-c[1].metric("Cost vs 2009 (− = saving)", money(k["extra_cost"]),
-            f"{money(k['cost_per_order'], 2)} per order", **NO_ARROW,
-            help="Overtime + staff difference vs the 2009 set-up, with the "
-                 "case wages. Below: spread over the forecast orders.")
-c[2].metric("Overtime cost", money(k["ot_cost"]),
-            help="Overtime and Saturday hours × people × wage × "
-                 "(1 + premium).")
-c[3].metric("Staff cost vs 2009", money(k["staff_cost"]),
-            help="(People now − people in 2009) × normal season hours × "
-                 "wage. Negative = saving.")
-c[4].metric(f"{ok(plk['net'] >= NET_PROFIT_PER_ORDER)} Net profit per parcel",
-            money(plk["net"], 2),
-            f"2009: £{NET_PROFIT_PER_ORDER:.2f}", **NO_ARROW,
-            help="Appendix 1 recalculated for this scenario (see the Costs "
-                 "tab). ✅ when it is at least the 2009 net profit per "
-                 "parcel.")
+            help="Forecast from the demand drivers, and the busiest week. "
+                 "Costs and profit are in the Costs tab.")
+
+# Limits reached: a pop-up (top right) when a limit appears or changes, and
+# a one-line reminder in a fixed place so the page layout never jumps.
+alerts = []
+if calc_error:
+    alerts.append(f"Not calculated: {calc_error} Showing the last valid "
+                  "result.")
 if k["stockout_weeks"]:
-    st.warning(f"⚠️ Out of stock in {k['stockout_weeks']} week(s): picking "
-               "had orders but no products.")
+    alerts.append(f"Out of stock in {k['stockout_weeks']} week(s): picking "
+                  "had orders but no products.")
 if k["not_delivered"] >= 1:
-    st.warning(f"⚠️ {k['not_delivered']:,.0f} orders' worth of stock never "
-               "arrived: there was no free space or no re-order left. Add "
-               "re-orders or give stock more m².")
+    alerts.append(f"{k['not_delivered']:,.0f} orders' worth of stock never "
+                  "arrived: no free space or no re-order left.")
+if k["below_min"]:
+    alerts.append(f"Stock below the {p['cover_days']}-day safety stock in "
+                  f"{k['below_min']} week(s).")
+if k["late_reorders"]:
+    alerts.append(f"{k['late_reorders']} re-order(s) would arrive after the "
+                  "season.")
+if alerts != st.session_state.get("shown_alerts"):
+    for a_ in alerts:
+        if a_ not in st.session_state.get("shown_alerts", []):
+            st.toast(a_, icon="⚠️", duration="long")
+    st.session_state["shown_alerts"] = alerts
+alert_line = st.empty()
+if alerts:
+    alert_line.caption("⚠️ Limits reached: " + " · ".join(alerts))
 
 
 def fig(title, ytitle, h=360):
@@ -738,11 +814,30 @@ def fig(title, ytitle, h=360):
 
 
 x = df["label"]
-tab1, tab_sp, tab2, tab_c, tab3 = st.tabs(["Capacity & bottleneck",
-                                           "Space & people", "Weekly flow",
-                                           "Costs", "Scenarios"])
+# a fixed key keeps the selected tab when the levers change
+tab1, tab2, tab_sp, tab_c, tab3 = st.tabs(["Capacity & bottleneck",
+                                           "Weekly flow", "Space & people",
+                                           "Costs", "Scenarios"],
+                                          key="main_tabs")
 
 with tab_c:
+    c = st.columns(4)
+    c[0].metric(f"{ok(plk['net'] >= NET_PROFIT_PER_ORDER)} Net profit per "
+                "parcel", money(plk["net"], 2),
+                f"2009: £{NET_PROFIT_PER_ORDER:.2f}", **NO_ARROW,
+                help="Appendix 1 recalculated for this scenario (table "
+                     "below). ✅ when it is at least the 2009 net profit per "
+                     "parcel.")
+    c[1].metric("Cost vs 2009 (− = saving)", money(k["extra_cost"]),
+                f"{money(k['cost_per_order'], 2)} per order", **NO_ARROW,
+                help="Overtime + staff difference vs the 2009 set-up, with "
+                     "the case wages. Below: spread over the forecast orders.")
+    c[2].metric("Overtime cost", money(k["ot_cost"]),
+                help="Overtime and Saturday hours × people × wage × "
+                     "(1 + premium).")
+    c[3].metric("Staff cost vs 2009", money(k["staff_cost"]),
+                help="(People now − people in 2009) × normal season hours × "
+                     "wage. Negative = saving.")
     st.markdown("#### Cost per parcel: 2009 (Appendix 1) vs new scenario")
     st.caption("One order = one parcel. Negative = cost. Totals = per parcel × "
                f"orders ({ORDERS_09:,} in 2009, {k['total']:,.0f} now).")
@@ -920,7 +1015,10 @@ with tab_sp:
         f"**{need['Dispatch'] * p['m2_dispatcher']:,.0f} m²** "
         f"(you have {a['Dispatch']:,.0f} m²)\n"
         f"- Stock at its peak: "
-        f"**{k['stock_m2_peak']:,.0f} m²** (you have {a['Stock']:,.0f} m²)")
+        f"**{k['stock_m2_peak']:,.0f} m²** (you have {a['Stock']:,.0f} m²)\n"
+        f"- Safety stock of {p['cover_days']} working days at its peak: "
+        f"**{k['cover_m2_peak']:,.0f} m²**; weeks below it: "
+        f"**{k['below_min']}**")
 
     st.markdown("#### Room for more people")
     rows = []
@@ -968,7 +1066,11 @@ with tab_sp:
                f"Space per order: {k['m2_unit']:.4f} m², so the stockroom "
                f"holds **{a['Stock'] / k['m2_unit']:,.0f} orders' worth**. "
                + f"First delivery in Oct w1, then {p['n_follow']} re-order(s) "
-                 f"every {p['interval']} weeks."
+                 f"every {p['interval']} weeks, "
+               + ("each sized to keep the safety stock"
+                  + (f"; {k['not_needed']:,.0f} orders' worth not needed and "
+                     "not bought." if k["not_needed"] >= 1 else ".")
+                  if p["cover_mode"] else "splitting the rest equally.")
                + (f" {k['late_reorders']} re-order(s) would arrive after the "
                   "season and are not received." if k["late_reorders"] else ""))
     if k["deliveries"]:
@@ -1018,7 +1120,8 @@ with tab2:
     f.add_scatter(x=x, y=df["stock_cap"], name="Stockroom capacity",
                   mode="lines", line=dict(color=C_CRITICAL, width=2,
                                           dash="dash"))
-    f.add_scatter(x=x, y=df["min_stock"], name="Needed for next 2 weeks",
+    f.add_scatter(x=x, y=df["min_stock"],
+                  name=f"Safety stock ({p['cover_days']} working days)",
                   mode="lines", line=dict(color=C_CAPACITY, width=2,
                                           dash="dot"))
     r.plotly_chart(f, width="stretch")
@@ -1069,6 +1172,9 @@ with tab3:
             "Value per order (£)": p["unit_value"],
             "Re-orders": p["n_follow"],
             "Weeks between": p["interval"],
+            "Safety stock (days)": p["cover_days"],
+            "Re-order size": "safety stock" if p["cover_mode"] else "calendar",
+            "Weeks below safety stock": k["below_min"],
             "Remote recording": "yes" if p["remote_rec"] else "no",
             "Stock postponed": round(k["cut"]),
             "Stock not delivered": round(k["not_delivered"]),
