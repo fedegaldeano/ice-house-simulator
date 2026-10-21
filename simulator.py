@@ -47,7 +47,6 @@ ORDERS_2009 = {("Oct", 2): 300, ("Oct", 3): 800, ("Oct", 4): 1800,
                ("Dec", 3): 1300, ("Dec", 4): 75}
 CLOSED = {("Dec", 4)}
 FIRST_DELIVERY = ("Oct", 1)
-OFFICE_M2 = 600          # second-floor office, one 600 m² working area
 FIRST_SHARE_2009 = 0.75   # the 2009 first delivery (75%) filled the stockrooms
 LAST_WEEK_BEFORE_XMAS = ("Dec", 3)
 
@@ -175,8 +174,7 @@ def simulate(cal, p):
     area = {"Packing": p["packing_m2"] + p["extra_pack"],
             "Dispatch": p["dispatch_m2"] + p["extra_disp"],
             "Stock": p["stock_m2"] + p["extra_area"] - p["extra_pack"]
-                     - p["extra_disp"]
-                     + (OFFICE_M2 if p["office_to_stock"] else 0)}
+                     - p["extra_disp"]}
     stock_cap = max(area["Stock"], 0) / m2_unit      # orders' worth that fit
     bought = total * (1 + margin)
     first_i = next(i for i in range(n) if (months[i], weeks[i]) == FIRST_DELIVERY)
@@ -416,18 +414,6 @@ with st.sidebar:
              "dispatchers at the same time.")
     st.caption(f"Extra area left for stock: "
                f"**{p['extra_area'] - p['extra_pack'] - p['extra_disp']:,} m²**")
-    p["remote_rec"] = st.checkbox(
-        "Remote recording staff (and remote mailroom)", False,
-        key=kk("remote_rec"),
-        help="Recording operators work from home and the post is handled "
-             "off-site. The office desks no longer limit how many operators "
-             "you can have, and the office becomes free.")
-    p["office_to_stock"] = (st.checkbox(
-        f"Use the freed office as stockroom (+{OFFICE_M2} m²)", True,
-        key=kk("office_to_stock"),
-        help="The office is one 600 m² working area on the second floor, "
-             "next to a stockroom. With remote recording it can hold stock.")
-        if p["remote_rec"] else False)
     with st.expander("Space standards"):
         p["packing_m2"] = st.number_input(
             "Packing area today (m²)", 0, 2000, 330, 10, key=kk("packing_m2"),
@@ -455,7 +441,7 @@ with st.sidebar:
                  "no space limit. This is only the top of the slider.")
 
     max_people = {
-        "Recording": 40 if p["remote_rec"] else int(desks),
+        "Recording": int(desks),
         "Picking": int(max_pickers),
         "Packing": int((p["packing_m2"] + p["extra_pack"]) // p["m2_packer"]),
         "Dispatch": int((p["dispatch_m2"] + p["extra_disp"])
@@ -472,8 +458,7 @@ with st.sidebar:
                    "Maximum = packing area ÷ space per packer.",
         "Dispatch": "People who label and confirm each parcel. 2009: 9. "
                     "Maximum = dispatch area ÷ space per dispatcher."}
-    why = {"Recording": ("remote, no desk limit" if p["remote_rec"]
-                         else f"{desks} desks"),
+    why = {"Recording": f"{desks} desks in the office",
            "Picking": "no space limit",
            "Packing": f"{p['packing_m2'] + p['extra_pack']:,} m² ÷ "
                       f"{p['m2_packer']} m²",
@@ -858,8 +843,8 @@ with tab_c:
             "- **Wages:** the 2009 cost per parcel of each stage, plus that "
             "stage's overtime and staff difference vs 2009 (including idle "
             "time) ÷ orders.\n"
-            "- **Not included:** remote recording keeps the same pay; late "
-            "orders are shown as sales at risk, not as losses.")
+            "- **Not included:** late orders are shown as sales at risk, not "
+            "as losses.")
 
 with tab1:
     l, r = st.columns(2)
@@ -1146,7 +1131,6 @@ with tab3:
             "Weeks between": p["interval"],
             "Safety stock (days)": p["cover_days"],
             "Weeks below safety stock": k["below_min"],
-            "Remote recording": "yes" if p["remote_rec"] else "no",
             "Stock postponed": round(k["cut"]),
             "Stock not delivered": round(k["not_delivered"]),
             "Cost vs 2009 (£)": round(k["extra_cost"]),
