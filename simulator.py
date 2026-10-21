@@ -198,19 +198,8 @@ def simulate(cal, p):
         # deliveries arriving this week, capped by free stockroom space
         arriving = (i == first_i) or (i in follow_weeks)
         if arriving and left > 0:
-            if i == first_i:
-                plan = bought * p["first_share"]
-            elif p["cover_mode"]:
-                # re-order sized to hold the safety stock until the next
-                # delivery: orders not yet picked + orders until then +
-                # the cover needed when the next delivery is due
-                nxt = next((w_ for w_ in follow_weeks if w_ > i), n)
-                pending = q["Recording"] + q["Picking"]
-                target = (pending + sum(orders[i:nxt])
-                          + min_stock[min(nxt, n) - 1])
-                plan = min(max(0.0, target - stock), to_deliver)
-            else:
-                plan = to_deliver / left
+            plan = (bought * p["first_share"] if i == first_i
+                    else to_deliver / left)
             if p["n_follow"] == 0:
                 plan = to_deliver
             got = max(0.0, min(plan, stock_cap - stock))
@@ -307,11 +296,7 @@ def simulate(cal, p):
         "area": area,
         "stock_m2_peak": max(out["stock_peak"]) * m2_unit,
         "m2_unit": m2_unit, "margin": margin, "units_2009": units_2009,
-        "bought": bought,
-        # with cover-based re-orders, stock left with the supplier was simply
-        # not needed; with the fixed calendar it is stock that never arrived
-        "not_delivered": 0.0 if p["cover_mode"] else to_deliver,
-        "not_needed": to_deliver if p["cover_mode"] else 0.0,
+        "bought": bought, "not_delivered": to_deliver,
         "cover_m2_peak": max(min_stock) * m2_unit,
         "cut": sum(d_["Cut by space"] for d_ in deliveries),
         "deliveries": deliveries, "late_reorders": len(late),
@@ -652,17 +637,8 @@ with st.sidebar:
              "stock is dynamic: each week it equals the forecast orders of "
              "the next N working days, so it rises towards the November "
              "peak and falls in December. Lower it to test the 'lower stock "
-             "level' option. It never stops picking: it is the level the "
-             "deliveries aim to keep.")
-    p["cover_mode"] = st.radio(
-        "Re-order size", ["Fixed calendar (2009)", "Keep the safety stock"],
-        key=kk("reorder_mode"),
-        help="Fixed calendar: the stock left after the first delivery is "
-             "split equally between the re-orders, as in 2009. Keep the "
-             "safety stock: each re-order (same dates) brings what is needed "
-             "to keep the safety stock until the next delivery; stock not "
-             "needed is not bought. Both are capped by the free stockroom "
-             "space.") == "Keep the safety stock"
+             "level' option. It is a check, not a rule: it never stops "
+             "picking and does not change the deliveries.")
 
     # 7. SETTINGS -----------------------------------------------------------
     st.header("7. Policy and cost")
@@ -1066,11 +1042,7 @@ with tab_sp:
                f"Space per order: {k['m2_unit']:.4f} m², so the stockroom "
                f"holds **{a['Stock'] / k['m2_unit']:,.0f} orders' worth**. "
                + f"First delivery in Oct w1, then {p['n_follow']} re-order(s) "
-                 f"every {p['interval']} weeks, "
-               + ("each sized to keep the safety stock"
-                  + (f"; {k['not_needed']:,.0f} orders' worth not needed and "
-                     "not bought." if k["not_needed"] >= 1 else ".")
-                  if p["cover_mode"] else "splitting the rest equally.")
+                 f"every {p['interval']} weeks, splitting the rest equally."
                + (f" {k['late_reorders']} re-order(s) would arrive after the "
                   "season and are not received." if k["late_reorders"] else ""))
     if k["deliveries"]:
@@ -1173,7 +1145,6 @@ with tab3:
             "Re-orders": p["n_follow"],
             "Weeks between": p["interval"],
             "Safety stock (days)": p["cover_days"],
-            "Re-order size": "safety stock" if p["cover_mode"] else "calendar",
             "Weeks below safety stock": k["below_min"],
             "Remote recording": "yes" if p["remote_rec"] else "no",
             "Stock postponed": round(k["cut"]),
